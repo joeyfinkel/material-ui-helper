@@ -3,11 +3,10 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
-using System.Security.Principal;
+using System.Reflection;
 using System.Text.Json;
 using MaterialUIHelper.Enums;
 using MaterialUIHelper.Models.filter;
-using MaterialUIHelper.Options;
 using MaterialUIHelper.Services;
 
 namespace MaterialUIHelper.Extensions;
@@ -73,59 +72,56 @@ public static class EnumerableExtensions
         }
         else
         {
-            switch (check)
+            if (check == FilterCheck.IsAnyOf && value is IEnumerable<TValue> values)
             {
-                case FilterCheck.IsAnyOf when value is IEnumerable<TValue> values:
+                constant = Expression.Constant(values, typeof(TValue));
+                
+                var containsMethod = source is IQueryable<TItem>
+                    ? typeof(Queryable).GetMethods()
+                        .First(p => p.Name == nameof(Queryable.Contains) && p.GetParameters().Length == 2)
+                        .MakeGenericMethod(typeof(TValue))
+                    : typeof(Enumerable).GetMethods()
+                        .First(p => p.Name == nameof(Queryable.Contains) && p.GetParameters().Length == 2)
+                        .MakeGenericMethod(typeof(TValue));
+                
+                predicate = Expression.Call(containsMethod, constant, property);
+            }
+            else
+            {
+                predicate = check switch
                 {
-                    constant = Expression.Constant(values, typeof(TValue));
-
-                    var containsMethod = source is IQueryable<TItem>
-                        ? typeof(Queryable).GetMethods()
-                            .First(p => p.Name == nameof(Queryable.Contains) && p.GetParameters().Length == 2)
-                            .MakeGenericMethod(typeof(TValue))
-                        : typeof(Enumerable).GetMethods()
-                            .First(p => p.Name == nameof(Queryable.Contains) && p.GetParameters().Length == 2)
-                            .MakeGenericMethod(typeof(TValue));
-
-                    predicate = Expression.Call(containsMethod, constant, property);
-                    break;
-                }
-                default:
-                    predicate = check switch
-                    {
-                        FilterCheck.Equal => Expression.AndAlso(notNullProperty,
-                            Expression.Equal(property, castedConstant)),
-                        FilterCheck.NotEqual => Expression.AndAlso(notNullProperty,
-                            Expression.NotEqual(property, castedConstant)),
-                        FilterCheck.GreaterThan => Expression.AndAlso(notNullProperty,
-                            Expression.GreaterThan(castedConstant, property)),
-                        FilterCheck.GreaterThanOrEqual => Expression.AndAlso(notNullProperty,
-                            Expression.GreaterThanOrEqual(castedConstant, property)),
-                        FilterCheck.LessThan => Expression.AndAlso(notNullProperty,
-                            Expression.LessThan(castedConstant, property)),
-                        FilterCheck.LessThanOrEqual => Expression.AndAlso(notNullProperty,
-                            Expression.LessThan(castedConstant, property)),
-                        FilterCheck.Contains => Expression.AndAlso(notNullProperty,
-                            Expression.Call(property, nameof(string.Contains), null, constant)),
-                        FilterCheck.StartsWith => Expression.AndAlso(notNullProperty,
-                            Expression.Call(property, nameof(string.StartsWith), null, constant)),
-                        FilterCheck.EndsWith => Expression.AndAlso(notNullProperty,
-                            Expression.Call(property, nameof(string.EndsWith), null, constant)),
-                        FilterCheck.IsEmpty => Expression.OrElse(notNullProperty,
-                            Expression.Equal(property, Expression.Constant(null, property.Type))),
-                        FilterCheck.IsNotEmpty => Expression.AndAlso(
-                            Expression.NotEqual(property,
-                                Expression.Constant(null, property.Type)), // Check for not null
-                            Expression.NotEqual(property, Expression.Constant("")) // Check for not empty string
-                        ),
-                        FilterCheck.IsAnyOf => Expression.Call(typeof(Enumerable).GetMethods()
-                                .First(p => p.Name == nameof(Enumerable.Contains) && p.GetParameters().Length == 2)
-                                .MakeGenericMethod(typeof(TValue)),
-                            Expression.Constant(value, typeof(IEnumerable<TValue>)),
-                            property),
-                        _ => throw new ArgumentOutOfRangeException(nameof(check), "Invalid filter check")
-                    };
-                    break;
+                    FilterCheck.Equal => Expression.AndAlso(notNullProperty,
+                        Expression.Equal(property, castedConstant)),
+                    FilterCheck.NotEqual => Expression.AndAlso(notNullProperty,
+                        Expression.NotEqual(property, castedConstant)),
+                    FilterCheck.GreaterThan => Expression.AndAlso(notNullProperty,
+                        Expression.GreaterThan(castedConstant, property)),
+                    FilterCheck.GreaterThanOrEqual => Expression.AndAlso(notNullProperty,
+                        Expression.GreaterThanOrEqual(castedConstant, property)),
+                    FilterCheck.LessThan => Expression.AndAlso(notNullProperty,
+                        Expression.LessThan(castedConstant, property)),
+                    FilterCheck.LessThanOrEqual => Expression.AndAlso(notNullProperty,
+                        Expression.LessThan(castedConstant, property)),
+                    FilterCheck.Contains => Expression.AndAlso(notNullProperty,
+                        Expression.Call(property, nameof(string.Contains), null, constant)),
+                    FilterCheck.StartsWith => Expression.AndAlso(notNullProperty,
+                        Expression.Call(property, nameof(string.StartsWith), null, constant)),
+                    FilterCheck.EndsWith => Expression.AndAlso(notNullProperty,
+                        Expression.Call(property, nameof(string.EndsWith), null, constant)),
+                    FilterCheck.IsEmpty => Expression.OrElse(notNullProperty,
+                        Expression.Equal(property, Expression.Constant(null, property.Type))),
+                    FilterCheck.IsNotEmpty => Expression.AndAlso(
+                        Expression.NotEqual(property,
+                            Expression.Constant(null, property.Type)), // Check for not null
+                        Expression.NotEqual(property, Expression.Constant("")) // Check for not empty string
+                    ),
+                    // FilterCheck.IsAnyOf => Expression.Call(typeof(Enumerable).GetMethods()
+                    //         .First(p => p.Name == nameof(Enumerable.Contains) && p.GetParameters().Length == 2)
+                    //         .MakeGenericMethod(typeof(TValue)),
+                    //     Expression.Constant(value, typeof(IEnumerable<TValue>)),
+                    //     property),
+                    _ => throw new ArgumentOutOfRangeException(nameof(check), "Invalid filter check")
+                };
             }
         }
 
@@ -135,19 +131,19 @@ public static class EnumerableExtensions
         var lambda = Expression.Lambda(lambdaType, predicate, parameter);
         var method = source is IQueryable
             ? typeof(EnumerableExtensions).GetMethod(nameof(ApplyFilterQueryable),
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+                BindingFlags.NonPublic | BindingFlags.Static)
             : typeof(EnumerableExtensions).GetMethod(nameof(ApplyFilterEnumerable),
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                BindingFlags.NonPublic | BindingFlags.Static);
         var genericMethod = method!.MakeGenericMethod(elementType);
 
         switch (source)
         {
-            case IQueryable: 
+            case IQueryable:
                 return genericMethod.Invoke(null, new[] { source, lambda });
             case IEnumerable:
             {
                 var compiled = lambda.Compile();
-            
+
                 return genericMethod.Invoke(null, new[] { source, compiled });
             }
             default:
